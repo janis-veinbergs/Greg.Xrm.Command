@@ -416,12 +416,7 @@ namespace Greg.Xrm.Command.Commands.Plugin.Step
 				.NumberColor(Color.DarkSeaGreen4_1)
 				.BooleanColor(Color.DarkSeaGreen4_1);
 
-			var panel = new Panel(jsonText)
-				.Header("[Gold1] Plugin Step Definitions [/]")
-				.BorderColor(Color.SkyBlue2)
-				.Padding(1, 1);
-
-			ansiConsole.Write(panel);
+			ansiConsole.Write(jsonText);
 			ansiConsole.WriteLine();
 		}
 
