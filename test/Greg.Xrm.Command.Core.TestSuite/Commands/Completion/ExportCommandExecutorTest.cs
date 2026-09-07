@@ -81,6 +81,37 @@ namespace Greg.Xrm.Command.Commands.Completion
 
 
 		[TestMethod]
+		public async Task ExportShouldSkipCommandsUnderHiddenNamespaces()
+		{
+			var (_, text) = await ExecuteAsync();
+			var doc = JObject.Parse(text);
+
+			// "!config" is a hidden namespace: the help does not show it, so the
+			// completion must not offer "!config" as a candidate after "pacx" either
+			var commands = (JArray)doc["commands"]!;
+			var hidden = commands.Where(c => ((string?)c["verbs"]![0])!.StartsWith('!')).ToList();
+			Assert.AreEqual(0, hidden.Count, $"Commands under a hidden namespace must not be exported, found: {string.Join(", ", hidden.Select(c => string.Join(' ', c["verbs"]!.Values<string>())))}");
+
+			var namespaces = (JArray)doc["namespaces"]!;
+			Assert.IsFalse(namespaces.Any(n => ((string?)n["verbs"]![0])!.StartsWith('!')));
+		}
+
+
+		[TestMethod]
+		public async Task ExportShouldBePlainAscii()
+		{
+			var (_, text) = await ExecuteAsync();
+
+			// help texts contain characters like "→"; with stdout redirected the console
+			// code page may replace them with control characters that break JSON parsers,
+			// so the export escapes everything outside ASCII
+			var offending = text.Where(c => c > 127).Distinct().ToList();
+			Assert.AreEqual(0, offending.Count, $"Export must be plain ASCII, found: {string.Join(" ", offending)}");
+			Assert.IsNotNull(JObject.Parse(text)["commands"]);
+		}
+
+
+		[TestMethod]
 		public async Task ExportShouldContainNamespacesWithHelp()
 		{
 			var (_, text) = await ExecuteAsync();

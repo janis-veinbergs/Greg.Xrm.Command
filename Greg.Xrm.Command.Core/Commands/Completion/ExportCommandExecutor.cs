@@ -12,7 +12,7 @@ namespace Greg.Xrm.Command.Commands.Completion
 		public Task<CommandResult> ExecuteAsync(ExportCommand command, CancellationToken cancellationToken)
 		{
 			var commands = registry.Commands
-				.Where(c => !c.Hidden)
+				.Where(c => !c.Hidden && !IsUnderHiddenNamespace(registry.Tree, c.Verbs))
 				.OrderBy(c => c)
 				.Select(c => new
 				{
@@ -34,7 +34,14 @@ namespace Greg.Xrm.Command.Commands.Completion
 			var namespaces = new List<object>();
 			CollectNamespaces(registry.Tree, new List<string>(), namespaces);
 
-			var json = JsonConvert.SerializeObject(new { commands, namespaces }, Formatting.Indented);
+			// non-ASCII characters are escaped so the output survives redirection:
+			// with stdout redirected the console code page can turn e.g. "→" in a
+			// help text into a control character, which is invalid inside JSON
+			var json = JsonConvert.SerializeObject(new { commands, namespaces }, new JsonSerializerSettings
+			{
+				Formatting = Formatting.Indented,
+				StringEscapeHandling = StringEscapeHandling.EscapeNonAscii
+			});
 
 			// written through the raw output writer on purpose: the ansi console
 			// renderer would hard-wrap long lines at the console width, which
@@ -42,6 +49,24 @@ namespace Greg.Xrm.Command.Commands.Completion
 			ansiConsole.Profile.Out.Writer.WriteLine(json);
 
 			return Task.FromResult(CommandResult.Success());
+		}
+
+
+		/// <summary>
+		/// Commands under a hidden namespace (e.g. "!config") are not shown by the help,
+		/// so they should not be offered by the completion either.
+		/// </summary>
+		private static bool IsUnderHiddenNamespace(IReadOnlyList<VerbNode> tree, IReadOnlyList<string> verbs)
+		{
+			var nodes = tree;
+			foreach (var verb in verbs)
+			{
+				var node = nodes.FirstOrDefault(n => string.Equals(n.Verb, verb, StringComparison.OrdinalIgnoreCase));
+				if (node is null) return false;
+				if (node.IsHidden) return true;
+				nodes = node.Children;
+			}
+			return false;
 		}
 
 
