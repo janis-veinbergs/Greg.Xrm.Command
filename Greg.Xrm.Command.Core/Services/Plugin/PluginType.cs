@@ -98,7 +98,16 @@ namespace Greg.Xrm.Command.Services.Plugin
 			{
 				var query = new QueryExpression("plugintype");
 				query.ColumnSet.AddColumns("plugintypeid", "name", "typename", "culture", "friendlyname", "ismanaged", "isworkflowactivity", "plugintypeexportkey", "publickeytoken", "version", "pluginassemblyid");
-				query.Criteria.AddCondition("name", ConditionOperator.EndsWith, name);
+
+				if (name.Contains('*') || name.Contains('%'))
+				{
+					query.Criteria.AddCondition("name", ConditionOperator.Like, name.Replace("*", "%"));
+				}
+				else
+				{
+					query.Criteria.AddCondition("name", ConditionOperator.EndsWith, name);
+				}
+
 				query.NoLock = true;
 
 				var result = await crm.RetrieveMultipleAsync(query, cancellationToken);
