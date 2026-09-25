@@ -130,6 +130,60 @@ namespace Greg.Xrm.Command.Commands.Views.Model
 			return (fetch.ToString(), layout.ToString());
 		}
 
+		public static (string FetchXml, string LayoutXml, IReadOnlyList<string> UnusedAttributes) SetView(
+			string fetchXml, string layoutXml, string tableName)
+		{
+			var fetch = ParseFetch(fetchXml);
+			var entity = fetch.Root!.Element("entity")!;
+			if (!string.Equals((string?)entity.Attribute("name"), tableName, StringComparison.OrdinalIgnoreCase))
+				throw new ArgumentException($"FetchXML entity must be '{tableName}'.");
+			var layout = ParseLayout(layoutXml);
+			var rows = layout.Root!.Elements("row").ToList();
+			if (rows.Count != 1 || string.IsNullOrWhiteSpace((string?)rows[0].Attribute("id")))
+				throw new ArgumentException("LayoutXML must contain one <row> with an id attribute.");
+			var row = rows[0];
+			var cells = row.Elements("cell").ToList();
+			var cellNames = cells.Select(cell => (string?)cell.Attribute("name")).ToList();
+			if (cellNames.Count == 0 || cellNames.Any(string.IsNullOrWhiteSpace) ||
+				cellNames.Distinct(StringComparer.OrdinalIgnoreCase).Count() != cellNames.Count)
+				throw new ArgumentException("LayoutXML must contain distinct, named <cell> elements.");
+
+			if (entity.Descendants("all-attributes").Any())
+				throw new ArgumentException("FetchXML <all-attributes/> cannot be validated against layout cells; use explicit <attribute> elements.");
+
+			var selected = new List<string>();
+			selected.AddRange(entity.Elements("attribute").Select(GetSelectedName));
+			foreach (var link in entity.Descendants("link-entity"))
+			{
+				var linkAlias = (string?)link.Attribute("alias");
+				foreach (var attribute in link.Elements("attribute"))
+				{
+					var attributeAlias = (string?)attribute.Attribute("alias");
+					var name = (string?)attribute.Attribute("name");
+					selected.Add(!string.IsNullOrWhiteSpace(attributeAlias) ? attributeAlias :
+						!string.IsNullOrWhiteSpace(linkAlias) && !string.IsNullOrWhiteSpace(name) ? linkAlias + "." + name : string.Empty);
+				}
+			}
+			if (selected.Any(string.IsNullOrWhiteSpace))
+				throw new ArgumentException("Every FetchXML <attribute> must have a name; linked attributes also need a link alias or attribute alias.");
+
+			var selectedNames = selected.ToHashSet(StringComparer.OrdinalIgnoreCase);
+			var missing = cellNames.Where(name => !selectedNames.Contains(name!)).ToList();
+			if (missing.Count > 0)
+				throw new ArgumentException("LayoutXML columns missing from FetchXML: " + string.Join(", ", missing));
+
+			var displayed = cellNames.Select(name => name!).ToHashSet(StringComparer.OrdinalIgnoreCase);
+			var rowId = (string?)row.Attribute("id");
+			var unused = selected.Where(name => !displayed.Contains(name) && !string.Equals(name, rowId, StringComparison.OrdinalIgnoreCase))
+				.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+			return (fetch.ToString(), layout.ToString(), unused);
+		}
+
+		private static string GetSelectedName(XElement attribute)
+		{
+			return (string?)attribute.Attribute("alias") ?? (string?)attribute.Attribute("name") ?? string.Empty;
+		}
+
 		private static XDocument ParseFetch(string? xml)
 		{
 			if (string.IsNullOrWhiteSpace(xml)) throw new ArgumentException("The view has no FetchXML.");

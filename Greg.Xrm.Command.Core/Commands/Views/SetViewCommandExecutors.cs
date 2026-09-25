@@ -31,12 +31,30 @@ namespace Greg.Xrm.Command.Commands.Views
 				view => ViewXmlEditor.SetColumns(view.fetchxml, view.layoutxml, command.Columns));
 	}
 
+	public class SetCommandExecutor(IOrganizationServiceRepository connection, IOutput output, IViewRetrieverService retriever, IPublishXmlBuilder publisher)
+		: ICommandExecutor<SetCommand>
+	{
+		public Task<CommandResult> ExecuteAsync(SetCommand command, CancellationToken cancellationToken) =>
+			ViewSetExecutor.RunAsync(connection, output, retriever, publisher, command,
+				view => ViewXmlEditor.SetView(command.FetchXml, command.LayoutXml, view.returnedtypecode), command.Publish);
+	}
+
 	internal static class ViewSetExecutor
 	{
+		public static Task<CommandResult> RunAsync(
+			IOrganizationServiceRepository connection, IOutput output, IViewRetrieverService retriever,
+			IPublishXmlBuilder publisher, SetViewCommand command,
+			Func<TableView, (string FetchXml, string? LayoutXml)> edit, bool publish = true) =>
+			RunAsync(connection, output, retriever, publisher, command, view =>
+			{
+				var updated = edit(view);
+				return (updated.FetchXml, updated.LayoutXml, (IReadOnlyList<string>)Array.Empty<string>());
+			}, publish);
+
 		public static async Task<CommandResult> RunAsync(
 			IOrganizationServiceRepository connection, IOutput output, IViewRetrieverService retriever,
 			IPublishXmlBuilder publisher, SetViewCommand command,
-			Func<TableView, (string FetchXml, string? LayoutXml)> edit)
+			Func<TableView, (string FetchXml, string? LayoutXml, IReadOnlyList<string> UnusedAttributes)> edit, bool publish = true)
 		{
 			output.Write("Connecting to the current dataverse environment...");
 			var crm = await connection.GetCurrentConnectionAsync();
@@ -45,7 +63,7 @@ namespace Greg.Xrm.Command.Commands.Views
 			var (result, view) = await retriever.GetByNameAsync(crm, command.QueryType, command.ViewName, command.TableName);
 			if (view == null) return result;
 
-			(string FetchXml, string? LayoutXml) updated;
+			(string FetchXml, string? LayoutXml, IReadOnlyList<string> UnusedAttributes) updated;
 			try
 			{
 				updated = edit(view);
@@ -68,6 +86,10 @@ namespace Greg.Xrm.Command.Commands.Views
 				output.WriteLine("Error", ConsoleColor.Red);
 				return CommandResult.Fail($"An error occurred while updating the view: {ex.Message}", ex);
 			}
+			if (updated.UnusedAttributes.Count > 0)
+				output.WriteLine("Warning: FetchXML selects attributes not shown in the layout: " +
+					string.Join(", ", updated.UnusedAttributes) + ". Removing them may make the query more efficient.", ConsoleColor.Yellow);
+			if (!publish) return CommandResult.Success();
 
 			try
 			{

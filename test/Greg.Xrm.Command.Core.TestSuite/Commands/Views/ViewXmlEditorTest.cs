@@ -74,5 +74,43 @@ namespace Greg.Xrm.Command.Commands.Views
 			Assert.AreEqual("100", (string?)grid.Descendants("cell").First().Attribute("width"));
 			Assert.AreEqual(3, XDocument.Parse(fetchXml).Descendants("attribute").Count());
 		}
+
+		[TestMethod]
+		public void SetView_WarnsAboutUnshownAttributes()
+		{
+			const string layout = "<grid><row id='accountid'><cell name='name' width='175'/><cell name='alias.city' width='90'/></row></grid>";
+			var (fetchXml, layoutXml, unused) = ViewXmlEditor.SetView(Fetch, layout, "account");
+			Assert.IsTrue(fetchXml.Contains("accountid"));
+			Assert.AreEqual("175", (string?)XDocument.Parse(layoutXml).Descendants("cell").First().Attribute("width"));
+			CollectionAssert.AreEqual(new[] { "old" }, unused.ToArray());
+		}
+
+		[TestMethod]
+		public void SetView_RejectsMissingColumns()
+		{
+			const string layout = "<grid><row id='accountid'><cell name='name'/><cell name='telephone1'/></row></grid>";
+			var error = Assert.ThrowsExactly<ArgumentException>(() => ViewXmlEditor.SetView(Fetch, layout, "account"));
+			StringAssert.Contains(error.Message, "telephone1");
+			var replacement = "<fetch><entity name='account'><attribute name='name'/><attribute name='telephone1'/><attribute name='accountid'/></entity></fetch>";
+			var (fetchXml, _, unused) = ViewXmlEditor.SetView(replacement, layout, "account");
+			Assert.IsTrue(fetchXml.Contains("telephone1"));
+			Assert.AreEqual(0, unused.Count);
+		}
+
+		[TestMethod]
+		public void SetView_RejectsFetchForDifferentTable()
+		{
+			const string layout = "<grid><row id='accountid'><cell name='name'/></row></grid>";
+			Assert.ThrowsExactly<ArgumentException>(() => ViewXmlEditor.SetView(
+				"<fetch><entity name='contact'><attribute name='name'/></entity></fetch>", layout, "account"));
+		}
+
+		[TestMethod]
+		public void SetView_RejectsAllAttributesBecauseCellsCannotBeChecked()
+		{
+			const string layout = "<grid><row id='accountid'><cell name='name'/></row></grid>";
+			Assert.ThrowsExactly<ArgumentException>(() => ViewXmlEditor.SetView(
+				"<fetch><entity name='account'><all-attributes/></entity></fetch>", layout, "account"));
+		}
 	}
 }
