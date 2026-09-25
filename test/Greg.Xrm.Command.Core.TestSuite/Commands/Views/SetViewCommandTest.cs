@@ -27,5 +27,19 @@ namespace Greg.Xrm.Command.Commands.Views
 			Assert.AreEqual("My View", command.ViewName);
 			Assert.AreEqual("name,telephone1", command.Columns);
 		}
+
+		[TestMethod]
+		public void ParseSetWithBothXmlDocuments()
+		{
+			var command = Utility.TestParseCommand<SetCommand>("view", "set", "--name", "My View",
+				"--layoutxml", "<grid/>", "--fetchxml", "<fetch/>");
+			Assert.AreEqual("My View", command.ViewName);
+			Assert.AreEqual("<grid/>", command.LayoutXml);
+			Assert.AreEqual("<fetch/>", command.FetchXml);
+			Assert.IsFalse(command.Publish);
+			var publishing = Utility.TestParseCommand<SetCommand>("view", "set", "--name", "My View",
+				"--layoutxml", "<grid/>", "--fetchxml", "<fetch/>", "--publish", "true");
+			Assert.IsTrue(publishing.Publish);
+		}
 	}
 }
