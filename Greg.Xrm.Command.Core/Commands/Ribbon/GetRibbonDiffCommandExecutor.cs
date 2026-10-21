@@ -1,66 +1,80 @@
-using System.Xml.Linq;
 using Greg.Xrm.Command.Model;
 using Greg.Xrm.Command.Services.Connection;
 using Greg.Xrm.Command.Services.Output;
+using Greg.Xrm.Command.Services.Ribbon;
+using Microsoft.Crm.Sdk.Messages;
 
 namespace Greg.Xrm.Command.Commands.Ribbon
 {
 	public class GetRibbonDiffCommandExecutor(
 		IOutput output,
 		IOrganizationServiceRepository organizationServiceRepository,
-		ISolutionRepository solutionRepository) : ICommandExecutor<GetRibbonDiffCommand>
+		ISolutionRepository solutionRepository,
+		IRibbonDiffService ribbonService) : ICommandExecutor<GetRibbonDiffCommand>
 	{
 		public async Task<CommandResult> ExecuteAsync(GetRibbonDiffCommand command, CancellationToken cancellationToken)
 		{
+			// Preserve pipeable XML: progress and result metadata are shown only in file mode.
+			var progress = string.IsNullOrWhiteSpace(command.FileName) ? null : output;
 			try
 			{
-				output.Write("Connecting to the current dataverse environment...");
+				if (progress != null)
+				{
+					var path = Path.GetFullPath(command.FileName);
+					if (!Directory.Exists(Path.GetDirectoryName(path)) || Directory.Exists(path))
+						return CommandResult.Fail($"Invalid output file path <{command.FileName}>. Specify a file in an existing directory.");
+				}
+				progress?.Write("Connecting to the current dataverse environment...");
 				var crm = await organizationServiceRepository.GetCurrentConnectionAsync();
-				output.WriteLine("Done", ConsoleColor.Green);
+				progress?.WriteLine("Done", ConsoleColor.Green);
 
-				var (componentId, componentType) = await RibbonDiffExport.ResolveComponentAsync(crm, command.TableName, cancellationToken);
 				var solutionName = command.SolutionName;
 				if (string.IsNullOrWhiteSpace(solutionName))
 				{
 					solutionName = await organizationServiceRepository.GetCurrentDefaultSolutionAsync();
-				if (!string.IsNullOrWhiteSpace(solutionName))
-					output.WriteLine($"Using default solution <{solutionName}>. For ribbon diffs, consider a dedicated solution with only the target table (no metadata or assets), e.g. --solution RibbonDiff.", ConsoleColor.Yellow);
+					if (!string.IsNullOrWhiteSpace(solutionName))
+						progress?.WriteLine($"Using default solution <{solutionName}>. For ribbon diffs, consider a dedicated solution with only the target table (no metadata or assets), e.g. --solution RibbonDiff.", ConsoleColor.Yellow);
 				}
 				if (string.IsNullOrWhiteSpace(solutionName))
 					return CommandResult.Fail("No solution specified and no default solution found. Provide a small ribbon solution with --solution RibbonDiff.");
-				var sourceSolution = await solutionRepository.GetByUniqueNameAsync(crm, solutionName);
-				if (sourceSolution == null)
-					return CommandResult.Fail($"Solution <{solutionName}> was not found.");
-				var validationError = await RibbonDiffExport.ValidateSolutionAsync(
-					crm, sourceSolution.Id, solutionName, componentId, componentType, cancellationToken);
-				if (validationError != null)
-					return CommandResult.Fail(validationError);
 
-				using var solution = await solutionRepository.CreateTemporarySolutionAsync(crm, sourceSolution.publisherid);
-				await solution.AddComponentAsync(componentId, componentType, includeSubcomponents: false);
-				using var archive = await solution.DownloadAsync();
-				XElement? ribbonDiff = null;
-				archive.UpdateEntryXml("customizations.xml", document =>
-				{
-					ribbonDiff = RibbonDiffExport.FindRibbonDiff(document, command.TableName);
-					return false;
-				});
-				if (ribbonDiff == null)
-					return CommandResult.Fail("RibbonDiffXml was not found in the exported temporary solution.");
+				progress?.Write("Retrieving solution '").Write(solutionName, ConsoleColor.Yellow).Write("'...");
+				var solution = await solutionRepository.GetByUniqueNameAsync(crm, solutionName);
+				progress?.WriteLine("Done", ConsoleColor.Green);
+				if (solution == null) return CommandResult.Fail($"Solution <{solutionName}> was not found.");
+				if (solution.ismanaged) return CommandResult.Fail($"Solution <{solutionName}> is managed and cannot be exported. Specify an unmanaged solution.");
 
-				var xml = ribbonDiff.ToString();
-				if (string.IsNullOrWhiteSpace(command.FileName))
-					output.WriteLine(xml);
-				else
+				progress?.Write("Validating ribbon solution...");
+				var (componentId, componentType) = await ribbonService.ResolveComponentAsync(crm, command.TableName, cancellationToken);
+				var validationError = await ribbonService.ValidateSolutionAsync(crm, solution.Id, solutionName, componentId, componentType, cancellationToken);
+				if (validationError != null) return CommandResult.Fail(validationError);
+				progress?.WriteLine("Done", ConsoleColor.Green);
+
+				progress?.Write("Exporting solution '").Write(solutionName, ConsoleColor.Yellow).Write("'...");
+				var response = (ExportSolutionResponse)await crm.ExecuteAsync(new ExportSolutionRequest
 				{
-					await File.WriteAllTextAsync(command.FileName, xml, cancellationToken);
-					output.WriteLine($"RibbonDiffXml saved to {command.FileName}", ConsoleColor.Green);
+					SolutionName = solution.uniquename, Managed = false
+				}, cancellationToken);
+				progress?.WriteLine("Done", ConsoleColor.Green);
+				var xml = ribbonService.Read(response.ExportSolutionFile, command.TableName).ToString();
+				if (progress == null)
+				{
+					output.WriteRawLine(xml);
+					// CommandRunnerBase prints nonempty results, which would corrupt redirected XML.
+					return CommandResult.Success();
 				}
-				return CommandResult.Success();
+
+				output.Write("Saving RibbonDiffXml to '").Write(command.FileName, ConsoleColor.Yellow).Write("'...");
+				await File.WriteAllTextAsync(command.FileName, xml, cancellationToken);
+				output.WriteLine("Done", ConsoleColor.Green);
+				var result = CommandResult.Success();
+				result["SolutionName"] = solutionName;
+				result["TableName"] = command.TableName;
+				result["OutputFile"] = command.FileName;
+				return result;
 			}
-			catch (Exception ex)
+			catch (Exception ex) when (ex is not OperationCanceledException)
 			{
-				output.WriteLine($"ERROR: {ex.Message}", ConsoleColor.Red);
 				return CommandResult.Fail(ex.Message, ex);
 			}
 		}

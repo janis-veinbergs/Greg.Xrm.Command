@@ -8,7 +8,7 @@ namespace Greg.Xrm.Command.Services.Settings
 	public class SettingsRepositoryTest
 	{
 		private string folder = null!;
-		private SettingsRepository CreateRepository() => new(new TestStorage(folder));
+		private IAtomicSettingsRepository CreateRepository() => new SettingsRepository(new TestStorage(folder));
 
 		[TestInitialize]
 		public void Initialize() => folder = Path.Combine(Path.GetTempPath(), "pacx-settings-test-" + Guid.NewGuid().ToString("N"));
@@ -20,11 +20,55 @@ namespace Greg.Xrm.Command.Services.Settings
 		}
 
 		[TestMethod]
+		public void OriginalInterfaceRetainsLegacyContract()
+		{
+			CollectionAssert.AreEquivalent(
+				new[] { "GetAsync", "SetAsync" },
+				typeof(ISettingsRepository).GetMethods().Select(method => method.Name).ToArray());
+		}
+
+		[TestMethod]
 		public async Task ConcurrentUpdatesAcrossInstancesRetainEveryChange()
 		{
 			await Task.WhenAll(Enumerable.Range(0, 40).Select(_ =>
 				CreateRepository().UpdateAsync<int>("counter", value => value + 1)));
 			Assert.AreEqual(40, await CreateRepository().GetAsync<int>("counter"));
+		}
+
+		[TestMethod]
+		public async Task UpdateInvokesCallbackOnceWithDefaultAndReturnsPersistedValue()
+		{
+			var repository = CreateRepository();
+			var invocationCount = 0;
+			var result = await repository.UpdateAsync<int>("counter", value =>
+			{
+				invocationCount++;
+				Assert.AreEqual(0, value);
+				return 42;
+			});
+
+			Assert.AreEqual(1, invocationCount);
+			Assert.AreEqual(42, result);
+			Assert.AreEqual(result, await repository.GetAsync<int>("counter"));
+		}
+
+		[TestMethod]
+		public async Task UpdateCallbackFailurePreservesCommittedValueAndReleasesMutex()
+		{
+			var repository = CreateRepository();
+			await repository.SetAsync("counter", 42);
+
+			await Assert.ThrowsAsync<InvalidOperationException>(() => repository.UpdateAsync<int>("counter", _ =>
+				throw new InvalidOperationException("Update failed deliberately.")));
+
+			Assert.AreEqual(42, await repository.GetAsync<int>("counter"));
+			Assert.AreEqual(43, await repository.UpdateAsync<int>("counter", value => value + 1));
+		}
+
+		[TestMethod]
+		public void UpdateRejectsNullCallback()
+		{
+			Assert.Throws<ArgumentNullException>(() => CreateRepository().UpdateAsync<int>("counter", null!));
 		}
 
 		[TestMethod]
@@ -88,6 +132,63 @@ namespace Greg.Xrm.Command.Services.Settings
 			var repository = CreateRepository();
 			await repository.SetAsync("path", "a path with spaces");
 			Assert.AreEqual("a path with spaces", await repository.GetAsync<string>("path"));
+		}
+
+		// Antivirus/indexers briefly open freshly written files without FILE_SHARE_DELETE: this caused random
+		// "Unable to remove the file to be replaced" failures. A handle without Delete sharing reproduces it.
+		private FileStream HoldLikeAnAntivirus(string key) =>
+			new(Path.Combine(folder, key + ".json"), FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+
+		[TestMethod]
+		public async Task SetRetriesWhileAnotherProcessBrieflyHoldsTheFile()
+		{
+			if (!OperatingSystem.IsWindows()) return; // Unix rename is not blocked by open handles.
+
+			var repository = CreateRepository();
+			await repository.SetAsync("setting", 1);
+
+			Task write;
+			using (HoldLikeAnAntivirus("setting"))
+			{
+				write = repository.SetAsync("setting", 2);
+				await Task.Delay(150);
+				Assert.IsFalse(write.IsCompleted, "Sanity check: the write must be blocked while the file is held.");
+			}
+			await write;
+
+			Assert.AreEqual(2, await repository.GetAsync<int>("setting"));
+			Assert.IsEmpty(Directory.GetFiles(folder, "*.tmp"));
+		}
+
+		[TestMethod]
+		public async Task SetFailsWithoutLosingDataWhenTheFileStaysLocked()
+		{
+			if (!OperatingSystem.IsWindows()) return;
+
+			var repository = CreateRepository();
+			await repository.SetAsync("setting", 1);
+
+			using (HoldLikeAnAntivirus("setting"))
+			{
+				await Assert.ThrowsAsync<IOException>(() => repository.SetAsync("setting", 2));
+			}
+
+			Assert.AreEqual(1, await repository.GetAsync<int>("setting"));
+			Assert.IsEmpty(Directory.GetFiles(folder, "*.tmp"));
+		}
+
+		[TestMethod]
+		public void ReplaceMovesTheReplacementWhenTheDestinationDisappeared()
+		{
+			Directory.CreateDirectory(folder);
+			var source = Path.Combine(folder, "setting.json.tmp");
+			var destination = Path.Combine(folder, "setting.json");
+			File.WriteAllText(source, "new");
+
+			SettingsRepository.ReplaceWithRetry(source, destination);
+
+			Assert.AreEqual("new", File.ReadAllText(destination));
+			Assert.IsFalse(File.Exists(source));
 		}
 
 		private sealed class TestStorage(string path) : IStorage
