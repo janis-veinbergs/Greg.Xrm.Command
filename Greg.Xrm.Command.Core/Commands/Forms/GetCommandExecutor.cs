@@ -12,13 +12,16 @@ namespace Greg.Xrm.Command.Commands.Forms
 	{
 		public async Task<CommandResult> ExecuteAsync(GetCommand command, CancellationToken cancellationToken)
 		{
-			if (!string.IsNullOrWhiteSpace(command.OutputFile) && !FormXmlFileHelper.TryValidateOutputPath(command.OutputFile, out var error))
+			if (!string.IsNullOrWhiteSpace(command.OutputFile) && !command.OutputFile.TryValidateOutputPath(out var error))
 				return CommandResult.Fail(error!);
 
+			output.Write("Connecting to the current dataverse environment...");
 			var crm = await organizationServiceRepository.GetCurrentConnectionAsync();
-			var forms = await formRepository.GetMainFormByTableNameAsync(crm, command.TableName);
-			if (!FormCommandHelpers.TryGetForm(output, command.TableName, command.FormName, forms, out var form, out var result, announce: false))
-				return result ?? CommandResult.Fail("Error retrieving the form");
+			output.WriteLine("Done", ConsoleColor.Green);
+
+			var (result, form) = await formRepository.GetByNameAsync(crm, command.TableName, command.FormName, announce: false);
+			if (!result.IsSuccess)
+				return result;
 
 			if (string.IsNullOrWhiteSpace(form?.formxml))
 				return CommandResult.Fail("No formxml found!");

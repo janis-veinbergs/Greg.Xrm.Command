@@ -1,3 +1,4 @@
+using Greg.Xrm.Command.Services.Forms;
 using System.IO.Compression;
 using Greg.Xrm.Command.Commands.Forms.Model;
 using Greg.Xrm.Command.Model;
@@ -11,6 +12,83 @@ namespace Greg.Xrm.Command.Commands.Forms
 	{
 		private readonly Mock<IFormRepository> forms = new();
 		private readonly Mock<ISolutionRepository> solutions = new();
+
+		[TestMethod]
+		[DataRow(false)]
+		[DataRow(true)]
+		public async Task BackupPathComparisonUsesPlatformCaseSensitivity(bool changeCase)
+		{
+			SetupForm();
+			var folder = Utility.CreateTempFolder();
+			var input = Path.Combine(folder, "form.xml");
+			var backup = Path.Combine(folder, changeCase ? "FORM.xml" : "form.xml");
+			try
+			{
+				await File.WriteAllTextAsync(input, FormXmlValidatorTest.ValidFormXml);
+				var result = await NewExecutor().ExecuteAsync(new SetCommand
+				{
+					TableName = "account", FileName = input, BackupFile = backup, Fast = true
+				}, CancellationToken.None);
+
+				if (changeCase && !OperatingSystem.IsWindows())
+				{
+					Assert.IsTrue(result.IsSuccess, result.ErrorMessage);
+					Assert.AreEqual(FormXmlValidatorTest.ValidFormXml, await File.ReadAllTextAsync(input));
+					Assert.AreEqual("<form><tabs /></form>", await File.ReadAllTextAsync(backup));
+				}
+				else
+				{
+					Assert.IsFalse(result.IsSuccess);
+					StringAssert.Contains(result.ErrorMessage, "must differ");
+					OrganizationServiceRepositoryMock.Verify(repo => repo.GetCurrentConnectionAsync(), Times.Never);
+				}
+			}
+			finally { Directory.Delete(folder, true); }
+		}
+
+		[TestMethod]
+		[DataRow(false)]
+		[DataRow(true)]
+		public async Task RejectsSchemaInvalidXmlBeforeConnectingOrWritingBackup(bool fast)
+		{
+			var path = Path.GetTempFileName();
+			var backup = Path.GetTempFileName();
+			try
+			{
+				await File.WriteAllTextAsync(path, "<form><tabs><tab name=\"new\" /></tabs></form>");
+				await File.WriteAllTextAsync(backup, "existing backup");
+				var result = await NewExecutor().ExecuteAsync(new SetCommand
+				{
+					TableName = "account", FileName = path, BackupFile = backup, Fast = fast, Publish = true
+				}, CancellationToken.None);
+
+				Assert.IsFalse(result.IsSuccess);
+				StringAssert.Contains(result.ErrorMessage, "Form XML validation failed");
+				StringAssert.Contains(result.ErrorMessage, "columns");
+				Assert.AreEqual("existing backup", await File.ReadAllTextAsync(backup));
+				OrganizationServiceRepositoryMock.Verify(repo => repo.GetCurrentConnectionAsync(), Times.Never);
+				OrganizationServiceMock.Verify(crm => crm.UpdateAsync(It.IsAny<Entity>(), It.IsAny<CancellationToken>()), Times.Never);
+				solutions.Verify(repo => repo.CreateHoldingSolutionAsync(It.IsAny<Microsoft.PowerPlatform.Dataverse.Client.IOrganizationServiceAsync2>(), It.IsAny<string?>()), Times.Never);
+			}
+			finally { File.Delete(path); File.Delete(backup); }
+		}
+
+		[TestMethod]
+		public async Task AcceptsCompleteFormAndSkipsUnchangedXml()
+		{
+			var form = SetupForm();
+			form.formxml = FormXmlValidatorTest.ValidFormXml;
+			var path = Path.GetTempFileName();
+			try
+			{
+				await File.WriteAllTextAsync(path, "<?xml version=\"1.0\"?>" + form.formxml);
+				var result = await NewExecutor().ExecuteAsync(new SetCommand { TableName = "account", FileName = path, Fast = true }, CancellationToken.None);
+				Assert.IsTrue(result.IsSuccess, result.ErrorMessage);
+				StringAssert.Contains(Output.ToString(), "unchanged");
+				OrganizationServiceMock.Verify(crm => crm.UpdateAsync(It.IsAny<Entity>(), It.IsAny<CancellationToken>()), Times.Never);
+			}
+			finally { File.Delete(path); }
+		}
 
 		[TestMethod]
 		public void ParsesFileAndFormOptions()
@@ -41,6 +119,23 @@ namespace Greg.Xrm.Command.Commands.Forms
 		}
 
 		[TestMethod]
+		[DataRow(false)]
+		[DataRow(true)]
+		public async Task RejectsSolutionDiffBeforeConnecting(bool fast)
+		{
+			var path = Path.GetTempFileName();
+			try
+			{
+				await File.WriteAllTextAsync(path, "<form><tabs><tab name=\"new\"><cell id=\"{1}\" solutionaction=\"Removed\" /></tab></tabs></form>");
+				var result = await NewExecutor().ExecuteAsync(new SetCommand { TableName = "account", FileName = path, Fast = fast }, CancellationToken.None);
+				Assert.IsFalse(result.IsSuccess);
+				StringAssert.Contains(result.ErrorMessage, "solutionaction");
+				OrganizationServiceRepositoryMock.Verify(repo => repo.GetCurrentConnectionAsync(), Times.Never);
+			}
+			finally { File.Delete(path); }
+		}
+
+		[TestMethod]
 		public async Task DirectUpdateWarnsAndDoesNotPublishByDefault()
 		{
 			var form = SetupForm();
@@ -48,7 +143,7 @@ namespace Greg.Xrm.Command.Commands.Forms
 			var backup = Path.GetTempFileName();
 			try
 			{
-				await File.WriteAllTextAsync(path, "<form><tabs><tab name=\"new\" /></tabs></form>");
+				await File.WriteAllTextAsync(path, "<form><tabs><tab name=\"new\"><columns><column width=\"100%\" /></columns></tab></tabs></form>");
 				var result = await NewExecutor().ExecuteAsync(new SetCommand
 				{
 					TableName = "account", FileName = path, BackupFile = backup, Fast = true
@@ -71,7 +166,7 @@ namespace Greg.Xrm.Command.Commands.Forms
 			var path = Path.GetTempFileName();
 			try
 			{
-				await File.WriteAllTextAsync(path, "<form><tabs><tab name=\"new\" /></tabs></form>");
+				await File.WriteAllTextAsync(path, "<form><tabs><tab name=\"new\"><columns><column width=\"100%\" /></columns></tab></tabs></form>");
 				var result = await NewExecutor().ExecuteAsync(new SetCommand
 				{
 					TableName = "account", FileName = path, Fast = true, Publish = true
@@ -105,16 +200,10 @@ namespace Greg.Xrm.Command.Commands.Forms
 			var path = Path.GetTempFileName();
 			try
 			{
-				await File.WriteAllTextAsync(path, "<form><tabs><tab name=\"new\" /></tabs></form>");
-				OrganizationServiceRepositoryMock.Setup(repo => repo.GetCurrentDefaultSolutionAsync()).ReturnsAsync("Default");
-				var publisher = new EntityReference("publisher", Guid.NewGuid());
-				var solutionEntity = new Entity("solution", Guid.NewGuid());
-				solutionEntity["publisherid"] = publisher;
-				solutions.Setup(repo => repo.GetByUniqueNameAsync(OrganizationServiceMock.Object, "Default"))
-					.ReturnsAsync(new TestSolution(solutionEntity));
+				await File.WriteAllTextAsync(path, "<form><tabs><tab name=\"new\"><columns><column width=\"100%\" /></columns></tab></tabs></form>");
 				var temporary = new Mock<ITemporarySolution>();
 				temporary.Setup(temp => temp.DownloadAsync()).ReturnsAsync(new SolutionZipArchive(CreateSolutionZip()));
-				solutions.Setup(repo => repo.CreateTemporarySolutionAsync(OrganizationServiceMock.Object, publisher)).ReturnsAsync(temporary.Object);
+				solutions.Setup(repo => repo.CreateHoldingSolutionAsync(OrganizationServiceMock.Object, null)).ReturnsAsync((CommandResult.Success(), temporary.Object));
 				byte[]? uploaded = null;
 				temporary.Setup(temp => temp.UploadAsync(It.IsAny<byte[]>()))
 					.Callback<byte[]>(bytes => uploaded = bytes).Returns(Task.CompletedTask);
@@ -135,7 +224,7 @@ namespace Greg.Xrm.Command.Commands.Forms
 			finally { File.Delete(path); }
 		}
 
-		private SetCommandExecutor NewExecutor() => new(OrganizationServiceRepositoryMock.Object, forms.Object, solutions.Object, Output);
+		private SetCommandExecutor NewExecutor() => new(OrganizationServiceRepositoryMock.Object, forms.Object, solutions.Object, new FormXmlValidator(), Output);
 
 		private Form SetupForm()
 		{
@@ -143,9 +232,10 @@ namespace Greg.Xrm.Command.Commands.Forms
 			entity["name"] = "Information";
 			entity["formxml"] = "<form><tabs /></form>";
 			var form = new Form(entity);
-			forms.Setup(repo => repo.GetMainFormByTableNameAsync(OrganizationServiceMock.Object, "account")).ReturnsAsync([form]);
+			forms.Setup(repo => repo.GetByNameAsync(OrganizationServiceMock.Object, "account", It.IsAny<string>(), It.IsAny<bool>())).ReturnsAsync((CommandResult.Success(), form));
 			return form;
 		}
+
 
 		private sealed class TestSolution(Entity entity) : Greg.Xrm.Command.Model.Solution(entity);
 

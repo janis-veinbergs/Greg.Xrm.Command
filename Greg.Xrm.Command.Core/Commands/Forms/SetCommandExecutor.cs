@@ -4,6 +4,7 @@ using System.Xml.XPath;
 using Greg.Xrm.Command.Commands.Forms.Model;
 using Greg.Xrm.Command.Model;
 using Greg.Xrm.Command.Services.Connection;
+using Greg.Xrm.Command.Services.Forms;
 using Greg.Xrm.Command.Services.Output;
 using Microsoft.Crm.Sdk.Messages;
 using Microsoft.Xrm.Sdk;
@@ -14,6 +15,7 @@ namespace Greg.Xrm.Command.Commands.Forms
 		IOrganizationServiceRepository organizationServiceRepository,
 		IFormRepository formRepository,
 		ISolutionRepository solutionRepository,
+		IFormXmlValidator formXmlValidator,
 		IOutput output) : ICommandExecutor<SetCommand>
 	{
 		public async Task<CommandResult> ExecuteAsync(SetCommand command, CancellationToken cancellationToken)
@@ -23,10 +25,13 @@ namespace Greg.Xrm.Command.Commands.Forms
 
 			if (!string.IsNullOrWhiteSpace(command.BackupFile))
 			{
-				if (!FormXmlFileHelper.TryValidateOutputPath(command.BackupFile, out var pathError))
+				if (!command.BackupFile.TryValidateOutputPath(out var pathError))
 					return CommandResult.Fail(pathError!);
 
-				if (Path.GetFullPath(command.FileName).Equals(Path.GetFullPath(command.BackupFile), StringComparison.OrdinalIgnoreCase))
+				var inputPath = Path.GetFullPath(command.FileName);
+				var backupPath = Path.GetFullPath(command.BackupFile);
+				var pathComparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+				if (inputPath.Equals(backupPath, pathComparison))
 					return CommandResult.Fail("The --backup file must differ from the --file input.");
 			}
 
@@ -39,17 +44,31 @@ namespace Greg.Xrm.Command.Commands.Forms
 				replacement = document.Root ?? throw new XmlException("The XML document is empty.");
 				if (replacement.Name != "form")
 					return CommandResult.Fail("The input XML must contain one <form> root element.");
-				replacementXml = replacement.ToString(SaveOptions.DisableFormatting);
+				// Solution exports of forms layered over a managed base carry solutionaction diff markers instead of the complete form.
+				if (replacement.DescendantsAndSelf().Any(e => e.Attribute("solutionaction") != null))
+					return CommandResult.Fail("The input XML is a solution diff (it contains solutionaction attributes), not a complete form. Use the output of 'pacx forms get' instead.");
 			}
 			catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or XmlException)
 			{
 				return CommandResult.Fail($"Unable to read form XML from <{command.FileName}>: {ex.Message}", ex);
 			}
 
+			output.Write("Validating form XML...");
+			if (!formXmlValidator.TryValidate(replacementXml, out var validationErrors))
+			{
+				output.WriteLine("Failed", ConsoleColor.Red);
+				return CommandResult.Fail("Form XML validation failed:" + Environment.NewLine + string.Join(Environment.NewLine, validationErrors));
+			}
+			output.WriteLine("Done", ConsoleColor.Green);
+			replacementXml = replacement.ToString(SaveOptions.DisableFormatting);
+
+			output.Write("Connecting to the current dataverse environment...");
 			var crm = await organizationServiceRepository.GetCurrentConnectionAsync();
-			var forms = await formRepository.GetMainFormByTableNameAsync(crm, command.TableName);
-			if (!FormCommandHelpers.TryGetForm(output, command.TableName, command.FormName, forms, out var form, out var result))
-				return result ?? CommandResult.Fail("Error retrieving the form");
+			output.WriteLine("Done", ConsoleColor.Green);
+
+			var (result, form) = await formRepository.GetByNameAsync(crm, command.TableName, command.FormName);
+			if (!result.IsSuccess)
+				return result;
 
 			if (string.IsNullOrWhiteSpace(form?.formxml))
 				return CommandResult.Fail("No formxml found!");
@@ -80,7 +99,9 @@ namespace Greg.Xrm.Command.Commands.Forms
 					output.WriteLine("WARNING: --fast updates formxml directly. formjson may remain out of sync. Before publishing in production, apply the final XML without --fast.", ConsoleColor.Yellow);
 					var update = new Entity("systemform", form.Id);
 					update["formxml"] = replacementXml;
+					output.Write("Updating form XML...");
 					await crm.UpdateAsync(update, cancellationToken);
+					output.WriteLine("Done", ConsoleColor.Green);
 
 					if (command.Publish)
 					{
@@ -89,15 +110,17 @@ namespace Greg.Xrm.Command.Commands.Forms
 							ParameterXml = new XElement("importexportxml",
 								new XElement("entities", new XElement("entity", command.TableName))).ToString(SaveOptions.DisableFormatting)
 						};
+						output.Write($"Publishing table {command.TableName}...");
 						await crm.ExecuteAsync(request, cancellationToken);
+						output.WriteLine("Done", ConsoleColor.Green);
 					}
 				}
 				else
 				{
-					var (success, failure, solution) = await FormCommandHelpers.CreateHoldingSolutionAsync(
-						organizationServiceRepository, solutionRepository, output, crm, command.SolutionName);
-					if (!success || solution == null)
-						return failure ?? CommandResult.Fail("Error creating the holding solution");
+					var (solutionResult, solution) = await solutionRepository.CreateHoldingSolutionAsync(
+						crm, command.SolutionName);
+					if (!solutionResult.IsSuccess || solution == null)
+						return solutionResult;
 
 					using (solution)
 					{
