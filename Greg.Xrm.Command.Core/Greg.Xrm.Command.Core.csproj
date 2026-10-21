@@ -50,6 +50,7 @@
 
   <ItemGroup>
     <EmbeddedResource Include="Services\Ribbon\Schemas\*.xsd" />
+    <EmbeddedResource Include="Services\Views\Schemas\*.xsd" />
   </ItemGroup>
 
   <ItemGroup>

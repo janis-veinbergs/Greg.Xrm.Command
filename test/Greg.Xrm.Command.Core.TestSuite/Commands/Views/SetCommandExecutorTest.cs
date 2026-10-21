@@ -1,4 +1,4 @@
-using Greg.Xrm.Command.Commands.Views.Model;
+using Greg.Xrm.Command.Services.Views;
 using Greg.Xrm.Command.Commands.WebResources.PushLogic;
 using Greg.Xrm.Command.Model;
 using Greg.Xrm.Command.Services.Connection;
@@ -26,7 +26,7 @@ namespace Greg.Xrm.Command.Commands.Views
 			}, CancellationToken.None);
 			Assert.IsFalse(result.IsSuccess);
 			crm.Verify(c => c.UpdateAsync(It.IsAny<Entity>()), Times.Never());
-			crm.Verify(c => c.ExecuteAsync(It.IsAny<PublishXmlRequest>()), Times.Never());
+			crm.Verify(c => c.ExecuteAsync(It.IsAny<PublishXmlRequest>(), It.IsAny<CancellationToken>()), Times.Never());
 		}
 
 		[TestMethod]
@@ -41,7 +41,7 @@ namespace Greg.Xrm.Command.Commands.Views
 			}, CancellationToken.None);
 			Assert.IsTrue(result.IsSuccess);
 			crm.Verify(c => c.UpdateAsync(It.IsAny<Entity>()), Times.Once());
-			crm.Verify(c => c.ExecuteAsync(It.IsAny<PublishXmlRequest>()), Times.Never());
+			crm.Verify(c => c.ExecuteAsync(It.IsAny<PublishXmlRequest>(), It.IsAny<CancellationToken>()), Times.Never());
 			StringAssert.Contains(output.ToString(), "telephone1");
 		}
 
@@ -56,14 +56,37 @@ namespace Greg.Xrm.Command.Commands.Views
 			}, CancellationToken.None);
 			Assert.IsTrue(result.IsSuccess);
 			crm.Verify(c => c.ExecuteAsync(It.Is<PublishXmlRequest>(request =>
-				request.ParameterXml.Contains("<entity>account</entity>"))), Times.Once());
+				request.ParameterXml.Contains("<entity>account</entity>")), It.IsAny<CancellationToken>()), Times.Once());
+		}
+
+		[TestMethod]
+		[DataRow(false)]
+		[DataRow(true)]
+		public async Task SetFilterPublishesOnlyWhenRequested(bool publish)
+		{
+			var (connection, retriever, crm, output) = BuildDependencies();
+			var executor = new SetFilterCommandExecutor(connection.Object, output, retriever.Object, new PublishXmlBuilder(), CreateEditor().Object);
+			var result = await executor.ExecuteAsync(new SetFilterCommand
+			{
+				ViewName = "My View", Publish = publish,
+				Filter = "<filter><condition attribute='statecode' operator='eq' value='0'/></filter>"
+			}, CancellationToken.None);
+			Assert.IsTrue(result.IsSuccess, result.ErrorMessage);
+			crm.Verify(c => c.UpdateAsync(It.IsAny<Entity>()), Times.Once());
+			crm.Verify(c => c.ExecuteAsync(It.IsAny<PublishXmlRequest>(), It.IsAny<CancellationToken>()), publish ? Times.Once() : Times.Never());
 		}
 
 		private static (SetCommandExecutor Executor, Mock<IOrganizationServiceAsync2> Crm, OutputToMemory Output) BuildExecutor()
 		{
+			var (connection, retriever, crm, output) = BuildDependencies();
+			return (new SetCommandExecutor(connection.Object, output, retriever.Object, new PublishXmlBuilder(), CreateEditor().Object), crm, output);
+		}
+
+		private static (Mock<IOrganizationServiceRepository> Connection, Mock<IViewRetrieverService> Retriever, Mock<IOrganizationServiceAsync2> Crm, OutputToMemory Output) BuildDependencies()
+		{
 			var crm = new Mock<IOrganizationServiceAsync2>();
 			crm.Setup(c => c.UpdateAsync(It.IsAny<Entity>())).Returns(Task.CompletedTask);
-			crm.Setup(c => c.ExecuteAsync(It.IsAny<OrganizationRequest>())).ReturnsAsync(new OrganizationResponse());
+			crm.Setup(c => c.ExecuteAsync(It.IsAny<OrganizationRequest>(), It.IsAny<CancellationToken>())).ReturnsAsync(new OrganizationResponse());
 			var connection = new Mock<IOrganizationServiceRepository>();
 			connection.Setup(c => c.GetCurrentConnectionAsync()).ReturnsAsync(crm.Object);
 			var viewEntity = new Entity("savedquery", Guid.NewGuid());
@@ -75,8 +98,18 @@ namespace Greg.Xrm.Command.Commands.Views
 			var retriever = new Mock<IViewRetrieverService>();
 			retriever.Setup(r => r.GetByNameAsync(crm.Object, QueryType1.SavedQuery, "My View", null))
 				.ReturnsAsync((CommandResult.Success(), (TableView)view));
-			var output = new OutputToMemory();
-			return (new SetCommandExecutor(connection.Object, output, retriever.Object, new PublishXmlBuilder()), crm, output);
+			return (connection, retriever, crm, new OutputToMemory());
 		}
+		private static Mock<IViewXmlEditor> CreateEditor()
+		{
+			var editor = new Mock<IViewXmlEditor>();
+			editor.Setup(e => e.SetView(It.IsAny<string>(), It.IsAny<string>(), "account"))
+				.Returns((string fetch, string layout, string _) => (fetch, layout, new[] { "telephone1" }));
+			editor.Setup(e => e.SetView(It.IsAny<string>(), It.Is<string>(s => s.Contains("missing")), "account"))
+				.Throws(new ArgumentException("LayoutXML columns missing from FetchXML: missing"));
+			editor.Setup(e => e.SetFilter(It.IsAny<string>(), It.IsAny<string>())).Returns("<fetch/>");
+			return editor;
+		}
+
 	}
 }
