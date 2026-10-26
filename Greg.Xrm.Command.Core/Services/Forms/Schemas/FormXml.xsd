@@ -365,6 +365,7 @@
 								<xs:attribute name="contenttype" use="optional">
 									<xs:simpleType>
 										<xs:restriction base="xs:string">
+											<xs:enumeration value="cardSections"/>
 											<xs:enumeration value="expandAvailableSpace"/>
 											<xs:enumeration value="singleComponent"/>
 										</xs:restriction>
