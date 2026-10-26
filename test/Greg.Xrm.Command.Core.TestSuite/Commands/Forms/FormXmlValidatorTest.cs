@@ -29,6 +29,16 @@ namespace Greg.Xrm.Command.Commands.Forms
 		}
 
 		[TestMethod]
+		[DataRow("cardSections")]
+		[DataRow("expandAvailableSpace")]
+		[DataRow("singleComponent")]
+		public void AcceptsTabContentType(string contentType)
+		{
+			var xml = ValidFormXml.Replace("<tab name=\"general\"", $"<tab name=\"general\" contenttype=\"{contentType}\"");
+			Assert.IsTrue(new FormXmlValidator().TryValidate(xml, out var errors), string.Join(Environment.NewLine, errors));
+		}
+
+		[TestMethod]
 		[DataRow("")]
 		[DataRow("<form />")]
 		[DataRow("<form><tabs /></form>")]
